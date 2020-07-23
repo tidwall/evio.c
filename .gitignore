@@ -1,0 +1,4 @@
+*.dSYM
+a.out
+hashmap.*
+buf.*
