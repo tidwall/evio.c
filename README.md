@@ -25,33 +25,34 @@ Here's a simple echo server. Save the following file to `echo.c`
 #include <assert.h>
 #include "evio.h"
 
-void serving(const char **addrs, int naddrs, void *udata) {
+void serving(int64_t nano, const char **addrs, int naddrs, void *udata) {
     for (int i = 0; i < naddrs; i++) {
         printf("Serving at %s\n", addrs[i]);
     }
 }
 
-void error(const char *msg, bool fatal, void *udata) {
+void error(int64_t nano, const char *msg, bool fatal, void *udata) {
     fprintf(stderr, "%s\n", msg);
 }
 
-int tick(void *udata) {
-    // Have the ticker fire every 5 seconds
+int64_t tick(int64_t nano, void *udata) {
+    // Ticker fires every 5 seconds
     printf("Tick\n");
-    return 5000; // milliseconds
+    return 5e9; // nanoseconds
 }
 
-void opened(struct evio_conn *conn, void *udata) {
+void opened(int64_t nano, struct evio_conn *conn, void *udata) {
     printf("Connection opened: %s\n", evio_conn_addr(conn));
 }
 
-void closed(struct evio_conn *conn, void *udata) {
+void closed(int64_t nano, struct evio_conn *conn, void *udata) {
     printf("Connection closed: %s\n", evio_conn_addr(conn));
 }
 
-void data(struct evio_conn *conn, const void *data, size_t len, void *udata) {
-    // Echo back to the connection
-    evio_conn_write(conn, data, len);
+void data(int64_t nano, struct evio_conn *conn, const void *data, size_t len, void *udata) {
+    // Echo data
+    evio_conn_write(conn, "+OK\r\n", -1);
+    // evio_conn_write(conn, data, len);
 }
 
 int main() {
@@ -63,18 +64,11 @@ int main() {
         .closed = closed,
         .data = data,
     };
-
-    // Any number of addresses can be bound to the appliation.
-    // Here we are listening on tcp port 9999 (ipv4 and ipv6), and at a local
-    // unix socket file named "socket".
-    // For ipv4 only use an ip address like tcp://127.0.0.1:9999
-    // For ipv6 use something like tcp://[::1]:9999
     const char *addrs[] = { 
-        "tcp://localhost:9999",
+        "tcp://127.0.0.1:6379",
         "unix://socket",
     };
-    // Run the application. This is a forever operation. 
-    evio_main(addrs, 2, evs, NULL);
+    evio_main(addrs, sizeof(addrs)/sizeof(char*), evs, NULL);
 }
 ```
 

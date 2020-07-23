@@ -45,7 +45,7 @@ void evio_set_allocator(void *(malloc)(size_t), void (*free)(void*)) {
 #define eprintf(fatal, format, ...) { \
     snprintf(evio->errmsg, sizeof(evio->errmsg), format, ##__VA_ARGS__); \
     if (evio->events->error) { \
-        evio->events->error(evio->errmsg, fatal, evio->udata); \
+        evio->events->error(evio->nano, evio->errmsg, fatal, evio->udata); \
     } \
     if (fatal) exit(1); \
 }
@@ -78,6 +78,7 @@ struct evio {
     struct hashmap *conns;
     struct evio_conn *faulty; 
     void *udata;
+    int64_t nano;
 };
 
 static bool wake(struct evio_conn *conn);
@@ -234,7 +235,9 @@ const char *evio_conn_addr(struct evio_conn *conn) {
     return conn->addr;
 }
 
-static void net_accept(struct evio *evio, int qfd, int sfd, struct addr *a) {
+static void net_accept(struct evio *evio, int qfd, int sfd, 
+                       struct addr *a)
+{
     struct evio_conn *conn = NULL;
     int cfd = -1;
     struct sockaddr_storage addr;
@@ -267,7 +270,7 @@ static void net_accept(struct evio *evio, int qfd, int sfd, struct addr *a) {
         goto fail;
     }
     if (evio->events->opened) {
-        evio->events->opened(conn, evio->udata);
+        evio->events->opened(evio->nano, conn, evio->udata);
     }
     return;
 fail:
@@ -457,7 +460,7 @@ static struct addr *addr_listen(struct evio *evio, const char *str) {
 
 static void close_remove_conn(struct evio_conn *conn, struct evio *evio) {
     if (evio->events->closed) {
-        evio->events->closed(conn, evio->udata);
+        evio->events->closed(evio->nano, conn, evio->udata);
     }
     efree(conn->wbuf.data);
     close(conn->fd);
@@ -592,6 +595,9 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             naddrsfds++;
         }
     }
+    evio->nano = nano();
+    int64_t tick_delay = 1000000000;
+    int64_t start = evio->nano; 
     if (events.serving) {
         char **saddrs = emalloc(naddrsfds*sizeof(char *));
         if (!saddrs) {
@@ -604,15 +610,13 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             }
         }
 
-        events.serving((const char**)saddrs, naddrsfds, udata);
+        events.serving(evio->nano, (const char**)saddrs, naddrsfds, udata);
     }
     bool synced = false;
     char buffer[4096];
     int fds[32];
-    int64_t tick_delay = 1000000000;
-    int64_t start = nano(); 
     if (events.tick) {
-        tick_delay = ((int64_t)events.tick(udata))*1000000;
+        tick_delay = events.tick(evio->nano, udata);
         tick_delay = tick_delay < 0 ? 0 : tick_delay;
     }
     for (;;) {
@@ -621,12 +625,13 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
         if (n == -1) {
             panic("net_events: %s", strerror(errno));
         }
+        evio->nano = nano();
         if (events.tick) {
-            int64_t end = nano();
+            int64_t end = evio->nano;
             int64_t elapsed = end-start;
             if (elapsed > tick_delay) {
                 start = end;
-                tick_delay = ((int64_t)events.tick(udata))*1000000;
+                tick_delay = ((int64_t)events.tick(evio->nano, udata))*1000000;
                 tick_delay = tick_delay < 0 ? 0 : tick_delay;
             }
         }
@@ -641,7 +646,7 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
         if (!synced) {
             // sync before doing anything with connections.
             if (events.sync) {
-                synced = events.sync(udata);
+                synced = events.sync(evio->nano, udata);
                 if (!synced) {
                     continue;
                 }
@@ -672,12 +677,12 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             buffer[n] = '\0';
             if (events.data) {
                 conn->woke = true;
-                events.data(conn, buffer, n, udata);
+                events.data(evio->nano, conn, buffer, n, udata);
                 conn->woke = false;
             }
         }
         if (events.sync) {
-            synced = events.sync(udata);
+            synced = events.sync(evio->nano, udata);
             if (!synced) {
                 continue;
             }
