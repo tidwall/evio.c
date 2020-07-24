@@ -36,9 +36,9 @@ void error(int64_t nano, const char *msg, bool fatal, void *udata) {
 }
 
 int64_t tick(int64_t nano, void *udata) {
-    // Ticker fires every 5 seconds
     printf("Tick\n");
-    return 5e9; // nanoseconds
+    // next tick in 1 second. This can be any duration in nanoseconds.
+    return 1e9; 
 }
 
 void opened(int64_t nano, struct evio_conn *conn, void *udata) {
