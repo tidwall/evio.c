@@ -631,7 +631,7 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             int64_t elapsed = end-start;
             if (elapsed > tick_delay) {
                 start = end;
-                tick_delay = ((int64_t)events.tick(evio->nano, udata))*1000000;
+                tick_delay = ((int64_t)events.tick(evio->nano, udata));
                 tick_delay = tick_delay < 0 ? 0 : tick_delay;
             }
         }
