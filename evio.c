@@ -66,6 +66,7 @@ struct evio_conn {
     bool woke;
     bool faulty;
     struct buf wbuf;
+    size_t wbuf_idx;
     void *udata;
     struct evio *evio;
     char *addr;
@@ -462,7 +463,7 @@ static void close_remove_conn(struct evio_conn *conn, struct evio *evio) {
     if (evio->events->closed) {
         evio->events->closed(evio->nano, conn, evio->udata);
     }
-    efree(conn->wbuf.data);
+    buf_clear(&conn->wbuf);
     close(conn->fd);
     hashmap_delete(evio->conns, &conn);
     efree(conn->addr);
@@ -502,12 +503,14 @@ static bool unwake(struct evio_conn *conn) {
 
 static bool conn_flush(struct evio *evio, struct evio_conn *conn) {
     if (conn->wbuf.len > 0) {
-        for (size_t i = 0; i < conn->wbuf.len; ) {
+        for (size_t i = conn->wbuf_idx; i < conn->wbuf.len; ) {
             int n = write(conn->fd, conn->wbuf.data+i, conn->wbuf.len-i);
             if (n == -1) {
                 if (errno == EAGAIN) {
                     if (!wake(conn)) {
                         close_remove_conn(conn, evio);    
+                    } else {
+                        conn->wbuf_idx = i;
                     }
                 } else {
                     close_remove_conn(conn, evio);
@@ -517,6 +520,7 @@ static bool conn_flush(struct evio *evio, struct evio_conn *conn) {
             i += n;
         }
         conn->wbuf.len = 0;
+        conn->wbuf_idx = 0;
     }
     if (conn->closed) {
         close_remove_conn(conn, evio);
