@@ -50,9 +50,8 @@ void closed(int64_t nano, struct evio_conn *conn, void *udata) {
 }
 
 void data(int64_t nano, struct evio_conn *conn, const void *data, size_t len, void *udata) {
-    // Echo data
-    evio_conn_write(conn, "+OK\r\n", -1);
-    // evio_conn_write(conn, data, len);
+    // echo back to the connection
+    evio_conn_write(conn, data, len);
 }
 
 int main() {
@@ -64,11 +63,18 @@ int main() {
         .closed = closed,
         .data = data,
     };
+
+    // Any number of addresses can be bound to the appliation.
+    // Here we are listening on tcp port 9999 (ipv4 and ipv6), and at a local
+    // unix socket file named "socket".
+    // For ipv4 only use an ip address like tcp://127.0.0.1:9999
+    // For ipv6 use something like tcp://[::1]:9999
     const char *addrs[] = { 
-        "tcp://127.0.0.1:6379",
+        "tcp://localhost:9999",
         "unix://socket",
     };
-    evio_main(addrs, sizeof(addrs)/sizeof(char*), evs, NULL);
+    // Run the application. This is a forever operation. 
+    evio_main(addrs, 2, evs, NULL);
 }
 ```
 
@@ -76,4 +82,10 @@ Then build and run the server
 
 ```
 $ cc *.c && ./a.out
+```
+
+And connect
+
+```
+$ nc localhost 9999
 ```
