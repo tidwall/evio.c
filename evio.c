@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <setjmp.h> 
 #include "evio.h"
 #include "buf.h"
 #include "hashmap.h"
@@ -47,7 +48,7 @@ void evio_set_allocator(void *(malloc)(size_t), void (*free)(void*)) {
     if (evio->events->error) { \
         evio->events->error(evio->nano, evio->errmsg, fatal, evio->udata); \
     } \
-    if (fatal) exit(1); \
+    if (fatal) longjmp(evio->jbuf, 1); \
 }
 
 struct addr {
@@ -80,6 +81,7 @@ struct evio {
     struct evio_conn *faulty; 
     void *udata;
     int64_t nano;
+    jmp_buf jbuf;
 };
 
 static bool wake(struct evio_conn *conn);
@@ -568,6 +570,9 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
     signal(SIGPIPE, SIG_IGN);
     struct evio *evio = alloca(sizeof(struct evio));
     memset(evio, 0, sizeof(struct evio));
+    if (setjmp(evio->jbuf)) {
+        return;
+    }
     evio->events = &events;
     evio->errmsg[0] = '\0';
     evio->udata = udata;
@@ -712,3 +717,266 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
         }
     }
 }
+
+
+
+
+//==============================================================================
+// TESTS
+// $ cc -DEVIO_TEST *.c && ./a.out
+//==============================================================================
+#ifdef EVIO_TEST
+
+#include <pthread.h>
+#include <assert.h>
+#include <time.h>
+#include <setjmp.h> 
+
+int tseed = 0;     // test random seed
+int ttimeout = 30; // timeout of all tests in seconds
+
+
+void *test_timeout(void *udata) {
+    sleep(ttimeout);
+    printf("timeout elapsed\n");
+    exit(1);
+    return NULL;
+}
+
+void taddrserving(int64_t nano, const char **addrs, int naddrs, void *udata) {
+    longjmp(*((jmp_buf*)udata), 1);
+}
+
+void taddrerror(int64_t nano, const char *msg, bool fatal, void *udata) {
+    longjmp(*((jmp_buf*)udata), 2);
+}
+
+void test_addr(const char *addr, bool expect_ok) {
+    struct evio_events evs = { .serving = taddrserving, .error = taddrerror, };
+    jmp_buf buf;
+    int ret = setjmp(buf);
+    switch (ret) {
+    case 1: 
+        if (!expect_ok) {
+            fprintf(stderr, "expected ok, got bad: %s\n", addr);
+            exit(1);
+        }
+        return;
+    case 2: 
+        if (expect_ok) {
+            fprintf(stderr, "expected bad, got ok: %s\n", addr);
+            exit(1);
+        }
+        return;
+    }
+    evio_main((const char *[]){ addr }, 1, evs, &buf);
+    abort();
+}
+
+void test_bad_addrs() {
+    test_addr("badaddr626:0", false);
+    test_addr("badaddr626:12312312", false);
+    test_addr("badaddr626:usodifus", false);
+    test_addr("badaddr626:", false);
+    test_addr("tcp://badaddr626", false);
+    test_addr("http://badaddr626", false);
+    test_addr("unix://badaddr626", true);
+    test_addr("badaddr626", true);
+    remove("badaddr626");
+    test_addr("unix://badaddr626:99", false);
+    test_addr("[::1]:0", true);
+    test_addr("tcp://[::1]:0", true);
+    test_addr("tcp://[::1]:-1", false);
+    test_addr("tcp://[::1]:-1", false);
+    test_addr("localhost:0", true);
+    test_addr("tcp://localhost:0", true);
+}
+
+
+
+struct tctx {
+    pthread_mutex_t ready;
+    int copened;
+    int cclosed;
+};
+
+void tserving(int64_t nano, const char **addrs, int naddrs, void *udata) {
+    struct tctx *ctx = udata;
+    pthread_mutex_unlock(&ctx->ready);
+}
+
+void terror(int64_t nano, const char *msg, bool fatal, void *udata) {
+    printf("error: %s\n", msg);
+    abort();
+}
+
+void topened(int64_t nano, struct evio_conn *conn, void *udata) {
+    struct tctx *ctx = udata;
+    pthread_mutex_lock(&ctx->ready);
+    ctx->copened++;
+    pthread_mutex_unlock(&ctx->ready);
+}
+
+void tclosed(int64_t nano, struct evio_conn *conn, void *udata) {
+    struct tctx *ctx = udata;
+    pthread_mutex_lock(&ctx->ready);
+    ctx->cclosed++;
+    pthread_mutex_unlock(&ctx->ready);
+}
+
+void tdata(int64_t nano, struct evio_conn *conn, const void *data, size_t len, 
+           void *udata)
+{
+    evio_conn_write(conn, data, len);
+}
+
+void *server_main(void *udata) {
+    struct evio_events evs = {
+        .serving = tserving,
+        .error = terror,
+        .opened = topened,
+        .closed = tclosed,
+        .data = tdata,
+    };
+    const char *addrs[] = { "unix://tsock", "tcp://127.0.0.1:12345" };
+    evio_main(addrs, 2, evs, udata);
+    return NULL;
+}
+
+struct cctx {
+    bool unix1;
+    struct tctx *tctx;
+};
+
+pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+int trand() {
+    pthread_mutex_lock(&mu);
+    int v = rand();
+    pthread_mutex_unlock(&mu);
+    return v;
+}
+
+void *client_main(void *udata) {
+    struct cctx *ctx = udata;
+
+    // ensure the server started
+    // sleep(1);
+    pthread_mutex_lock(&ctx->tctx->ready);
+    pthread_mutex_unlock(&ctx->tctx->ready);
+
+
+    int sockfd;
+    struct sockaddr servaddr; 
+    memset(&servaddr, 0, sizeof(servaddr)); 
+    if (!ctx->unix1) {
+        // tcp
+        assert((sockfd = socket(AF_INET, SOCK_STREAM, 0)) != -1); 
+        struct sockaddr_in *addr = (struct sockaddr_in *)&servaddr;
+        addr->sin_family = AF_INET; 
+        addr->sin_addr.s_addr = inet_addr("127.0.0.1"); 
+        addr->sin_port = htons(12345); 
+    } else {
+        // unix
+        assert((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) != -1); 
+        struct sockaddr_un *addr = (struct sockaddr_un *)&servaddr;
+        addr->sun_family = AF_UNIX;
+        strcpy(addr->sun_path, "tsock");
+    }
+    // connect the client socket to server socket 
+    assert(!connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)));
+
+    // send around 100MB of paritally random packet up to 1MB, which
+    // will be echoed back.
+    int TSIZE = 100 * 1024 * 1024;
+    int PSIZE =   1 * 1024 * 1024;
+    int sent = 0;
+    char *data = malloc(PSIZE);
+    assert(data);
+    for (int i = 0; i < PSIZE; i++) {
+        data[i] = i;
+    }
+    char packet[4096];
+    int writes = 0;
+    while (sent < TSIZE) {
+        int nbytes = trand() % PSIZE;
+        if (writes%10==9) {
+            nbytes = 0;
+        }
+        if (nbytes > 0) {
+            data[trand()%nbytes] = trand();
+            data[trand()%nbytes] = trand();
+            data[trand()%nbytes] = trand();
+            data[trand()%nbytes] = trand();
+        }
+        int written = 0;
+        while (written < nbytes) {
+            int n = write(sockfd, data+written, nbytes-written);
+            assert(n > 0);
+            written += n;
+        }
+        assert(written == nbytes);
+        int bleft = nbytes;
+        int bread = 0;
+        while (bread < nbytes) {
+            int n = read(sockfd, packet, sizeof(packet));
+            assert(n > 0);
+            assert(n <= bleft);
+            assert(memcmp(packet, data+bread, n) == 0);
+            bread += n;
+        }
+        assert(bread == nbytes);
+        sent += nbytes;
+        writes++;
+    }
+    free(data);
+
+    assert(!close(sockfd));
+    return NULL;
+}
+
+void test_client_server() {
+    struct tctx ctx = {
+        .ready = PTHREAD_MUTEX_INITIALIZER,
+    };
+    pthread_mutex_lock(&ctx.ready);
+
+    pthread_t sth, cth0, cth1, cth2, cth3;
+    pthread_create(&sth, NULL, server_main, &ctx);
+
+    struct cctx ctx0 = { .unix1 = false, .tctx = &ctx };
+    pthread_create(&cth0, NULL, client_main, &ctx0);
+
+    struct cctx ctx1 = { .unix1 = false, .tctx = &ctx };
+    pthread_create(&cth1, NULL, client_main, &ctx1);
+    
+    struct cctx ctx2 = { .unix1 = false, .tctx = &ctx };
+    pthread_create(&cth2, NULL, client_main, &ctx2);
+    
+    struct cctx ctx3 = { .unix1 = false, .tctx = &ctx };
+    pthread_create(&cth3, NULL, client_main, &ctx3);
+    
+    pthread_join(cth0, NULL);
+    pthread_join(cth1, NULL);
+    pthread_join(cth2, NULL);
+    pthread_join(cth3, NULL);
+
+    pthread_mutex_unlock(&ctx.ready);
+    assert(ctx.cclosed == 4);
+    assert(ctx.copened == 4);
+    pthread_mutex_lock(&ctx.ready);
+
+}
+
+int main() {
+    printf("Running evio.c tests...\n");
+    tseed = getenv("SEED")?atoi(getenv("SEED")):time(NULL);
+    ttimeout = getenv("TIMEOUT")?atoi(getenv("TIMEOUT")):ttimeout;
+    printf("seed=%d, timeout=%ds\n", tseed, ttimeout);
+    pthread_t tth; // timeout thread
+    pthread_create(&tth, NULL, test_timeout, NULL);
+    test_bad_addrs();
+    test_client_server();
+    printf("PASSED\n");
+}
+
+#endif
