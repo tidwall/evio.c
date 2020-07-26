@@ -671,18 +671,20 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             if (!conn_flush(evio, conn)) {
                 continue;
             }
-            int n = read(conn->fd, buffer, sizeof(buffer)-1);
-            if (n <= 0) {
-                if (n != -1 || errno != EAGAIN) {
-                    close_remove_conn(conn, evio);
+            while (true) {
+                int n = read(conn->fd, buffer, sizeof(buffer)-1);
+                if (n <= 0) {
+                    if (n != -1 || errno != EAGAIN) {
+                        close_remove_conn(conn, evio);
+                    }
+                    break;
                 }
-                continue;
-            }
-            buffer[n] = '\0';
-            if (events.data) {
-                conn->woke = true;
-                events.data(evio->nano, conn, buffer, n, udata);
-                conn->woke = false;
+                buffer[n] = '\0';
+                if (events.data) {
+                    conn->woke = true;
+                    events.data(evio->nano, conn, buffer, n, udata);
+                    conn->woke = false;
+                }
             }
         }
         if (events.sync) {
