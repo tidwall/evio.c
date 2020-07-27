@@ -207,6 +207,27 @@ static int net_events(int qfd, int *fds, int nfds, int64_t timeout_ns) {
 
 #endif
 
+int setkeepalive(int fd) {
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &(int){1}, sizeof(int))) {
+        return -1;
+    }
+#if defined(__linux__)
+    // tcp_keepalive_time
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &(int){600}, sizeof(int))) {
+        return -1;
+    }
+    // tcp_keepalive_intvl
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &(int){60}, sizeof(int))) {
+        return -1;
+    }
+    // tcp_keepalive_probes
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &(int){6}, sizeof(int))) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+
 static int setnonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -248,6 +269,7 @@ static void net_accept(struct evio *evio, int qfd, int sfd,
     cfd = accept(sfd, (struct sockaddr *)&addr, &addrlen);
     if (cfd < 0) goto fail;
     if (setnonblock(cfd) == -1) goto fail;
+    if (!a->unsock && setkeepalive(cfd) == -1) goto fail;
     if (net_addrd(qfd, cfd) == -1) goto fail;
     conn = emalloc(sizeof(struct evio_conn));
     if (!conn) goto fail;
