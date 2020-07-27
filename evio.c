@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/un.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -745,7 +746,7 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
 
 //==============================================================================
 // TESTS
-// $ cc -DEVIO_TEST *.c && ./a.out
+// $ cc -DEVIO_TEST -pthread *.c && ./a.out
 //==============================================================================
 #ifdef EVIO_TEST
 
@@ -964,6 +965,8 @@ void test_client_server() {
 
     pthread_t sth, cth0, cth1, cth2, cth3;
     pthread_create(&sth, NULL, server_main, &ctx);
+
+    
 
     struct cctx ctx0 = { .unix1 = false, .tctx = &ctx };
     pthread_create(&cth0, NULL, client_main, &ctx0);
