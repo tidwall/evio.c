@@ -229,6 +229,11 @@ int setkeepalive(int fd) {
     return 0;
 }
 
+int settcpnodelay(int fd) {
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int));
+}
+
+
 static int setnonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -271,6 +276,7 @@ static void net_accept(struct evio *evio, int qfd, int sfd,
     if (cfd < 0) goto fail;
     if (setnonblock(cfd) == -1) goto fail;
     if (!a->unsock && setkeepalive(cfd) == -1) goto fail;
+    // if (!a->unsock && settcpnodelay(cfd) == -1) goto fail;
     if (net_addrd(qfd, cfd) == -1) goto fail;
     conn = emalloc(sizeof(struct evio_conn));
     if (!conn) goto fail;
@@ -502,8 +508,7 @@ static int conn_compare(const void *a, const void *b, void *udata) {
 }
 
 static uint64_t conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
-    struct evio_conn *citem = *(struct evio_conn **)item;
-    return hashmap_sip(&citem->fd, sizeof(int), seed0, seed1);
+    return (*(struct evio_conn **)item)->fd;
 }
 
 static bool wake(struct evio_conn *conn) {
@@ -599,8 +604,8 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
     evio->events = &events;
     evio->errmsg[0] = '\0';
     evio->udata = udata;
-    evio->conns = hashmap_new(sizeof(struct conn*), 0, nano(), nano(), 
-                              conn_hash, conn_compare, NULL);
+    evio->conns = hashmap_new(sizeof(struct conn *), 0, 0, 0, conn_hash, 
+                              conn_compare, NULL);
     if (!evio->conns) {
         eprintf(true, "%s", strerror(ENOMEM));
     }
@@ -641,12 +646,11 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
                 saddrs[k++] = paddrs[i]->addrs[j];
             }
         }
-
         events.serving(evio->nano, (const char**)saddrs, naddrsfds, udata);
     }
     bool synced = false;
     char buffer[4096];
-    int fds[32];
+    int fds[128];
     if (events.tick) {
         tick_delay = events.tick(evio->nano, udata);
         tick_delay = tick_delay < 0 ? 0 : tick_delay;
