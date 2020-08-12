@@ -719,7 +719,7 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
                 }
             }
         }
-        if (events.sync) {
+        if (events.sync && n > 0) {
             synced = events.sync(evio->nano, udata);
             if (!synced) {
                 continue;
