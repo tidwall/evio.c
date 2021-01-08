@@ -1,10 +1,10 @@
 file evio.c
 file evio.h
 
-import github.com/tidwall/buf.c v0.1.1
-import github.com/tidwall/hashmap.c v0.2.0
+import github.com/tidwall/buf.c v0.2.1
+import github.com/tidwall/hashmap.c v0.3.0
 
-sum 1b2a5cf04c46e831a4bc1dfcf1b6eb56c864bbda  buf.c
+sum f2d769527d9f3daa001aaac2773b5bfb24cc364e  buf.c
 sum bf7dc8c49ea1f859967e6446007b3b93a72419ea  buf.h
-sum cf439f8d597ee756888fcd1ead6a5c192e0d4966  hashmap.c
-sum 48f992784ef43c6dd2397aef4d190758be678cec  hashmap.h
+sum ae3ac34455413548ac072e728bb6aa379f94dc26  hashmap.c
+sum c40118ad5d2e21d7ae687c80c857ff8fd6f7d921  hashmap.h
