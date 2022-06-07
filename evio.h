@@ -1,4 +1,7 @@
-// Copyright 2020 Joshua J Baker. All rights reserved.
+// Copyright 2022 Joshua J Baker. All rights reserved.
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file.
+// Documentation at https://github.com/tidwall/evio.c
 
 #ifndef EVIO_H
 #define EVIO_H
