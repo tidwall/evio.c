@@ -17,7 +17,7 @@
 #include <netdb.h>
 #include <time.h>
 #include <arpa/inet.h>
-#include <setjmp.h> 
+#include <pthread.h> 
 #include "evio.h"
 #include "buf.h"
 #include "hashmap.h"
@@ -44,12 +44,14 @@ void evio_set_allocator(void *(malloc)(size_t), void (*free)(void*)) {
     exit(1); \
 }
 
-#define eprintf(fatal, format, ...) { \
-    snprintf(evio->errmsg, sizeof(evio->errmsg), format, ##__VA_ARGS__); \
-    if (evio->events->error) { \
-        evio->events->error(evio->nano, evio->errmsg, fatal, evio->udata); \
-    } \
-    if (fatal) longjmp(evio->jbuf, 1); \
+#define eprintf(fatal, format, ...) {                                         \
+    snprintf(evio->errmsg, sizeof(evio->errmsg), format, ##__VA_ARGS__);      \
+    if (evio->events.error) {                                                 \
+        evio->events.error(evio->errmsg, fatal, evio->udata);                 \
+    } else if (fatal) {                                                       \
+        panic(format, ##__VA_ARGS__);                                         \
+    }                                                                         \
+    if (fatal) exit(1);                                                       \
 }
 
 struct addr {
@@ -76,13 +78,11 @@ struct evio_conn {
 };
 
 struct evio {
-    struct evio_events *events;
+    struct evio_events events;
     char errmsg[256];
     struct hashmap *conns;
     struct evio_conn *faulty; 
     void *udata;
-    int64_t nano;
-    jmp_buf jbuf;
 };
 
 static bool wake(struct evio_conn *conn);
@@ -120,7 +120,7 @@ void evio_conn_set_udata(struct evio_conn *conn, void *udata) {
     conn->udata = udata;
 }
 
-#define EDELAYNS 100000000
+#define EDELAYNS 1000000000
 
 #if defined(__FreeBSD__) || defined(__APPLE__)
 
@@ -147,11 +147,16 @@ static int net_delwr(int qfd, int sfd) {
 
 static int net_events(int qfd, int *fds, int nfds, int64_t timeout_ns) {
     struct kevent evs[nfds]; // VLA
-    if (timeout_ns > EDELAYNS) {
-        timeout_ns = EDELAYNS;
+    int n;
+    if (timeout_ns < 0) {
+        n = kevent(qfd, NULL, 0, evs, nfds, NULL);
+    } else {
+        if (timeout_ns > EDELAYNS) {
+            timeout_ns = EDELAYNS;
+        }
+        struct timespec timeout = { .tv_nsec = timeout_ns };
+        n = kevent(qfd, NULL, 0, evs, nfds, &timeout);
     }
-    struct timespec timeout = { .tv_nsec = timeout_ns };
-    int n = kevent(qfd, NULL, 0, evs, nfds, &timeout);
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             fds[i] = evs[i].ident;
@@ -191,10 +196,15 @@ static int net_delwr(int qfd, int sfd) {
 
 static int net_events(int qfd, int *fds, int nfds, int64_t timeout_ns) {
     struct epoll_event evs[nfds]; // VLA
-    if (timeout_ns > EDELAYNS) {
-        timeout_ns = EDELAYNS;
+    int n;
+    if (timeout_ns < 0) {
+        n = epoll_wait(qfd, evs, nfds, -1);
+    } else {
+        if (timeout_ns > EDELAYNS) {
+            timeout_ns = EDELAYNS;
+        }
+        n = epoll_wait(qfd, evs, nfds, (int)(timeout_ns/1000000));
     }
-    int n = epoll_wait(qfd, evs, nfds, (int)(timeout_ns/1000000));
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             fds[i] = evs[i].data.fd;
@@ -301,8 +311,8 @@ static void net_accept(struct evio *evio, int qfd, int sfd,
     } else if (hashmap_oom(evio->conns)) {
         goto fail;
     }
-    if (evio->events->opened) {
-        evio->events->opened(evio->nano, conn, evio->udata);
+    if (evio->events.opened) {
+        evio->events.opened(conn, evio->udata);
     }
     return;
 fail:
@@ -491,8 +501,8 @@ static struct addr *addr_listen(struct evio *evio, const char *str) {
 }
 
 static void close_remove_conn(struct evio_conn *conn, struct evio *evio) {
-    if (evio->events->closed) {
-        evio->events->closed(evio->nano, conn, evio->udata);
+    if (evio->events.closed) {
+        evio->events.closed(conn, evio->udata);
     }
     buf_clear(&conn->wbuf);
     close(conn->fd);
@@ -563,7 +573,7 @@ static bool conn_flush(struct evio *evio, struct evio_conn *conn) {
     return true;
 }
 
-static int64_t nano() {
+int64_t evio_now() {
     struct timespec tm;
     if (clock_gettime(CLOCK_MONOTONIC, &tm) == -1) {
         panic("clock_gettime: %s", strerror(errno));
@@ -592,30 +602,29 @@ struct evio_conn *get_conn(struct evio *evio, int fd) {
     return *(struct evio_conn**)v;
 }
 
-void evio_main(const char *addrs[], int naddrs, struct evio_events events, 
-               void *udata)
-{
-    signal(SIGPIPE, SIG_IGN);
-    struct evio *evio = alloca(sizeof(struct evio));
+struct thread_context {
+    pthread_mutex_t *mu;
+    bool serving;
+    int server_id;
+    //
+    struct evio_events events;
+    void *udata;
+    struct addr **paddrs;
+    int naddrs;
+    
+};
+
+static void *thread(void *thdata) {
+    struct thread_context *thctx = thdata;
+    struct evio _evio;
+    struct evio *evio = &_evio;
     memset(evio, 0, sizeof(struct evio));
-    if (setjmp(evio->jbuf)) {
-        return;
-    }
-    evio->events = &events;
-    evio->errmsg[0] = '\0';
-    evio->udata = udata;
+    evio->events = thctx->events;
+    evio->udata = thctx->udata;
     evio->conns = hashmap_new(sizeof(struct conn *), 0, 0, 0, conn_hash, 
                               conn_compare, NULL);
     if (!evio->conns) {
         eprintf(true, "%s", strerror(ENOMEM));
-    }
-    struct addr **paddrs = emalloc(naddrs * sizeof(struct addr*));
-    if (!paddrs) {
-        eprintf(true, "%s", strerror(ENOMEM));
-    }
-    memset(paddrs, 0, naddrs * sizeof(struct addr*));
-    for (int i = 0; i < naddrs; i++) {
-        paddrs[i] = addr_listen(evio, addrs[i]);
     }
     int qfd = net_queue();
     if (qfd == -1) {
@@ -623,51 +632,63 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
     }
     // add all socket fds to queue
     int naddrsfds = 0;
-    for (int i = 0; i < naddrs; i++) {
-        for (int j = 0; j < paddrs[i]->nfds; j++) {
-            int sfd = paddrs[i]->fds[j];
+    for (int i = 0; i < thctx->naddrs; i++) {
+        for (int j = 0; j < thctx->paddrs[i]->nfds; j++) {
+            int sfd = thctx->paddrs[i]->fds[j];
             if (net_addrd(qfd, sfd) == -1) {
                 eprintf(true, "net_addrd(socket): %s", strerror(errno));
             }
             naddrsfds++;
         }
     }
-    evio->nano = nano();
-    int64_t tick_delay = 1000000000;
-    int64_t start = evio->nano; 
-    if (events.serving) {
-        char **saddrs = emalloc(naddrsfds*sizeof(char *));
-        if (!saddrs) {
-            eprintf(true, "%s", strerror(ENOMEM));
+    int server_id;
+    int64_t tick_delay = -1;
+    pthread_mutex_lock(thctx->mu);
+    thctx->server_id++;
+    server_id = thctx->server_id;
+    if (!thctx->serving) {
+        thctx->serving = true;
+        if (evio->events.serving) {
+            char **saddrs = emalloc(naddrsfds*sizeof(char *));
+            if (!saddrs) {
+                eprintf(true, "%s", strerror(ENOMEM));
+            }
+            int k = 0;
+            for (int i = 0; i < thctx->naddrs; i++) {
+                for (int j = 0; j < thctx->paddrs[i]->nfds; j++) {
+                    saddrs[k++] = thctx->paddrs[i]->addrs[j];
+                }
+            }
+            evio->events.serving((const char**)saddrs, naddrsfds, evio->udata);
         }
-        int k = 0;
-        for (int i = 0; i < naddrs; i++) {
-            for (int j = 0; j < paddrs[i]->nfds; j++) {
-                saddrs[k++] = paddrs[i]->addrs[j];
+        if (evio->events.tick) {
+            tick_delay = evio->events.tick(evio->udata);
+            if (tick_delay < 0) {
+                tick_delay = 0;
             }
         }
-        events.serving(evio->nano, (const char**)saddrs, naddrsfds, udata);
+    } else {
+        evio->events.tick = NULL;
     }
+    pthread_mutex_unlock(thctx->mu);
+
     bool synced = false;
     char buffer[4096];
     int fds[128];
-    if (events.tick) {
-        tick_delay = events.tick(evio->nano, udata);
-        tick_delay = tick_delay < 0 ? 0 : tick_delay;
-    }
+
+    int64_t start = evio_now();
     for (;;) {
         int64_t delay = synced ? tick_delay : 0;
         int n = net_events(qfd, fds, sizeof(fds)/sizeof(int), delay);
         if (n == -1) {
             panic("net_events: %s", strerror(errno));
         }
-        evio->nano = nano();
-        if (events.tick) {
-            int64_t end = evio->nano;
-            int64_t elapsed = end-start;
+        if (evio->events.tick) {
+            int64_t now = evio_now();
+            int64_t elapsed = now-start;
             if (elapsed > tick_delay) {
-                start = end;
-                tick_delay = ((int64_t)events.tick(evio->nano, udata));
+                start = now;
+                tick_delay = ((int64_t)evio->events.tick(evio->udata));
                 tick_delay = tick_delay < 0 ? 0 : tick_delay;
             }
         }
@@ -675,14 +696,15 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             // close faulty connections
             while (evio->faulty) {
                 close_remove_conn(evio->faulty, evio);
-                evio->faulty = evio->faulty;
+                evio->faulty = evio->faulty->next_faulty;
             }
+            evio->faulty = false;
             continue;
         }
         if (!synced) {
             // sync before doing anything with connections.
-            if (events.sync) {
-                synced = events.sync(evio->nano, udata);
+            if (evio->events.sync) {
+                synced = evio->events.sync(evio->udata);
                 if (!synced) {
                     continue;
                 }
@@ -691,9 +713,11 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             }
         }
         for (int i = 0; i < n; i++) {
-            int j = which_socketfd(fds[i], paddrs, naddrs);
+            // not a connection, check if it's a server socket.
+            int j = which_socketfd(fds[i], thctx->paddrs, thctx->naddrs);
             if (j != -1) {
-                net_accept(evio, qfd, fds[i], paddrs[j]);
+                // accept the incoming connection.
+                net_accept(evio, qfd, fds[i], thctx->paddrs[j]);
                 continue;
             }
             struct evio_conn *conn = get_conn(evio, fds[i]);
@@ -712,21 +736,21 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
                     break;
                 }
                 buffer[n] = '\0';
-                if (events.data) {
+                if (evio->events.data) {
                     conn->woke = true;
-                    events.data(evio->nano, conn, buffer, n, udata);
+                    evio->events.data(conn, buffer, n, evio->udata);
                     conn->woke = false;
                 }
             }
         }
-        if (events.sync && n > 0) {
-            synced = events.sync(evio->nano, udata);
+        if (evio->events.sync && n > 0) {
+            synced = evio->events.sync(evio->udata);
             if (!synced) {
                 continue;
             }
         }
         for (int i = 0; i < n; i++) {
-            if (which_socketfd(fds[i], paddrs, naddrs) != -1) {
+            if (which_socketfd(fds[i], thctx->paddrs, thctx->naddrs) != -1) {
                 continue;
             }
             struct evio_conn *conn = get_conn(evio, fds[i]);
@@ -743,8 +767,59 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
             }
         }
     }
+    return NULL;
 }
 
+void evio_main_mt(const char *addrs[], int naddrs, struct evio_events events, 
+                  void *udata, int nthreads)
+{
+    signal(SIGPIPE, SIG_IGN);
+    // create local evio for the purpose of error logging only.
+    struct evio _evio;
+    struct evio *evio = &_evio;
+    memset(evio, 0, sizeof(struct evio));
+    evio->events = events;
+    evio->udata = udata;
+    struct addr **paddrs = emalloc(naddrs * sizeof(struct addr*));
+    if (!paddrs) {
+        eprintf(true, "%s", strerror(ENOMEM));
+    }
+    memset(paddrs, 0, naddrs * sizeof(struct addr*));
+    for (int i = 0; i < naddrs; i++) {
+        paddrs[i] = addr_listen(evio, addrs[i]);
+    }
+    pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    struct thread_context thctx;
+    memset(&thctx, 0, sizeof(struct thread_context));
+    thctx.mu = &mu;
+    thctx.serving = false;
+    thctx.events = events;
+    thctx.udata = udata;
+    thctx.paddrs = paddrs;
+    thctx.naddrs = naddrs;
+    if (nthreads <= 0) {
+        nthreads = sysconf(_SC_NPROCESSORS_ONLN);
+    }
+    if (nthreads < 1) {
+        nthreads = 1;
+    }
+    for (long i = 0; i < nthreads; i++) {
+        pthread_t th;
+        int res = pthread_create(&th, NULL, thread, &thctx);
+        if (res) {
+            eprintf(true, "pthread_create: %s", strerror(errno));
+        }
+    }
+    while(1) {
+        sleep(10);
+    }
+}
+
+void evio_main(const char *addrs[], int naddrs, struct evio_events events, 
+               void *udata)
+{
+    evio_main_mt(addrs, naddrs, events, udata, 1);
+}
 
 
 
@@ -770,11 +845,11 @@ void *test_timeout(void *udata) {
     return NULL;
 }
 
-void taddrserving(int64_t nano, const char **addrs, int naddrs, void *udata) {
+void taddrserving(const char **addrs, int naddrs, void *udata) {
     longjmp(*((jmp_buf*)udata), 1);
 }
 
-void taddrerror(int64_t nano, const char *msg, bool fatal, void *udata) {
+void taddrerror(const char *msg, bool fatal, void *udata) {
     longjmp(*((jmp_buf*)udata), 2);
 }
 
@@ -827,31 +902,31 @@ struct tctx {
     int cclosed;
 };
 
-void tserving(int64_t nano, const char **addrs, int naddrs, void *udata) {
+void tserving(const char **addrs, int naddrs, void *udata) {
     struct tctx *ctx = udata;
     pthread_mutex_unlock(&ctx->ready);
 }
 
-void terror(int64_t nano, const char *msg, bool fatal, void *udata) {
+void terror(const char *msg, bool fatal, void *udata) {
     printf("error: %s\n", msg);
     abort();
 }
 
-void topened(int64_t nano, struct evio_conn *conn, void *udata) {
+void topened(struct evio_conn *conn, void *udata) {
     struct tctx *ctx = udata;
     pthread_mutex_lock(&ctx->ready);
     ctx->copened++;
     pthread_mutex_unlock(&ctx->ready);
 }
 
-void tclosed(int64_t nano, struct evio_conn *conn, void *udata) {
+void tclosed(struct evio_conn *conn, void *udata) {
     struct tctx *ctx = udata;
     pthread_mutex_lock(&ctx->ready);
     ctx->cclosed++;
     pthread_mutex_unlock(&ctx->ready);
 }
 
-void tdata(int64_t nano, struct evio_conn *conn, const void *data, size_t len, 
+void tdata(struct evio_conn *conn, const void *data, size_t len, 
            void *udata)
 {
     evio_conn_write(conn, data, len);
