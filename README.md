@@ -25,31 +25,31 @@ Here's a simple echo server. Save the following file to `echo.c`
 #include <assert.h>
 #include "evio.h"
 
-void serving(int64_t nano, const char **addrs, int naddrs, void *udata) {
+void serving(const char **addrs, int naddrs, void *udata) {
     for (int i = 0; i < naddrs; i++) {
         printf("Serving at %s\n", addrs[i]);
     }
 }
 
-void error(int64_t nano, const char *msg, bool fatal, void *udata) {
+void error(const char *msg, bool fatal, void *udata) {
     fprintf(stderr, "%s\n", msg);
 }
 
-int64_t tick(int64_t nano, void *udata) {
+int64_t tick(void *udata) {
     printf("Tick\n");
     // next tick in 1 second. This can be any duration in nanoseconds.
     return 1e9; 
 }
 
-void opened(int64_t nano, struct evio_conn *conn, void *udata) {
+void opened(struct evio_conn *conn, void *udata) {
     printf("Connection opened: %s\n", evio_conn_addr(conn));
 }
 
-void closed(int64_t nano, struct evio_conn *conn, void *udata) {
+void closed(struct evio_conn *conn, void *udata) {
     printf("Connection closed: %s\n", evio_conn_addr(conn));
 }
 
-void data(int64_t nano, struct evio_conn *conn, const void *data, size_t len, void *udata) {
+void data(struct evio_conn *conn, const void *data, size_t len, void *udata) {
     // echo back to the connection
     evio_conn_write(conn, data, len);
 }
@@ -88,4 +88,20 @@ And connect
 
 ```
 $ nc localhost 9999
+```
+
+
+## Multithreading
+
+Use the `evio_main_mt` function to start the server using multiple threads.
+
+```c
+// Use five threads
+evio_main_mt(addrs, 2, evs, NULL, 5);
+
+// Use ten threads
+evio_main_mt(addrs, 2, evs, NULL, 10);
+
+// Use the number of threads equal to the number of cores on the machine.
+evio_main_mt(addrs, 2, evs, NULL, 0);
 ```
