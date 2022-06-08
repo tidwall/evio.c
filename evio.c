@@ -624,7 +624,7 @@ static void *thread(void *thdata) {
     evio->events = thctx->events;
     evio->udata = thctx->udata;
     evio->conns = hashmap_new(sizeof(struct conn *), 0, 0, 0, conn_hash, 
-                              conn_compare, NULL);
+                              conn_compare, NULL, NULL);
     if (!evio->conns) {
         eprintf(true, "%s", strerror(ENOMEM));
     }
