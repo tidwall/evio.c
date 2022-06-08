@@ -643,11 +643,11 @@ static void *thread(void *thdata) {
             naddrsfds++;
         }
     }
-    int server_id;
+    // int server_id;
     int64_t tick_delay = -1;
     pthread_mutex_lock(thctx->mu);
     thctx->server_id++;
-    server_id = thctx->server_id;
+    // server_id = thctx->server_id;
     if (!thctx->serving) {
         thctx->serving = true;
         if (evio->events.serving) {
