@@ -805,16 +805,14 @@ void evio_main_mt(const char *addrs[], int naddrs, struct evio_events events,
     if (nthreads < 1) {
         nthreads = 1;
     }
-    for (long i = 0; i < nthreads; i++) {
+    for (long i = 1; i < nthreads; i++) {
         pthread_t th;
         int res = pthread_create(&th, NULL, thread, &thctx);
         if (res) {
             eprintf(true, "pthread_create: %s", strerror(errno));
         }
     }
-    while(1) {
-        sleep(10);
-    }
+    thread(&thctx);
 }
 
 void evio_main(const char *addrs[], int naddrs, struct evio_events events, 
