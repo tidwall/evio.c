@@ -297,8 +297,10 @@ static void net_accept(struct evio *evio, int qfd, int sfd,
     if (a->unsock) {
         snprintf(saddr, sizeof(saddr), "unix://%s", a->host);
     } else {
+        // copy the prefix 
         ipstr((struct sockaddr *)&addr, saddr, sizeof(saddr)-1);
-        sprintf(saddr+strlen(saddr), ":%d", 
+        // copy the port
+        snprintf(saddr+strlen(saddr), sizeof(saddr), ":%d", 
                 ((struct sockaddr_in *)&addr)->sin_port);
     }
     size_t saddrlen = strlen(saddr);
@@ -415,11 +417,12 @@ static struct addr *addr_listen(struct evio *evio, const char *str) {
         if (!addr->addrs) {
             eprintf(true, "%s", strerror(ENOMEM));
         }
-        addr->addrs[0] = emalloc(7+strlen(addr->host)+1);
+        size_t nbytes = 7+strlen(addr->host)+1;
+        addr->addrs[0] = emalloc(nbytes);
         if (!addr->addrs[0]) {
             eprintf(true, "%s", strerror(ENOMEM));
         }
-        sprintf(addr->addrs[0], "unix://%s", addr->host);
+        snprintf(addr->addrs[0], nbytes, "unix://%s", addr->host);
     } else {
         struct addrinfo hints = {}, *addrs;
         char port_str[16] = {};
@@ -427,7 +430,7 @@ static struct addr *addr_listen(struct evio *evio, const char *str) {
         hints.ai_family = AF_UNSPEC; 
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
-        sprintf(port_str, "%d", port);
+        snprintf(port_str, sizeof(port_str), "%d", port);
         int err = getaddrinfo(addr->host, port_str, &hints, &addrs);
         if (err != 0) {
             eprintf(true, "getaddrinfo: %s: %s", gai_strerror(err), str); 
@@ -478,7 +481,7 @@ static struct addr *addr_listen(struct evio *evio, const char *str) {
             err = 0;
             addr->fds[addr->nfds] = fd;
             ipstr(addrinfo->ai_addr, saddr, sizeof(saddr)-1);
-            sprintf(saddr+strlen(saddr), ":%d", port);
+            snprintf(saddr+strlen(saddr), sizeof(saddr), ":%d", port);
 
             addr->addrs[addr->nfds] = emalloc(strlen(saddr)+1);
             if (!addr->addrs[addr->nfds]) {
