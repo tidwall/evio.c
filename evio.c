@@ -517,12 +517,14 @@ static void close_remove_conn(struct evio_conn *conn, struct evio *evio) {
 }
 
 static int conn_compare(const void *a, const void *b, void *udata) {
+    (void)udata;
     struct evio_conn *ca = *(struct evio_conn **)a;
     struct evio_conn *cb = *(struct evio_conn **)b;
     return ca->fd < cb->fd ? -1 : ca->fd > cb->fd ? 1 : 0;
 }
 
 static uint64_t conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
+    (void)seed0; (void)seed1;
     return (*(struct evio_conn **)item)->fd;
 }
 
@@ -832,6 +834,10 @@ void evio_main(const char *addrs[], int naddrs, struct evio_events events,
 //==============================================================================
 #ifdef EVIO_TEST
 
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+
 #include <pthread.h>
 #include <assert.h>
 #include <time.h>
@@ -969,10 +975,9 @@ void *client_main(void *udata) {
     pthread_mutex_lock(&ctx->tctx->ready);
     pthread_mutex_unlock(&ctx->tctx->ready);
 
-
     int sockfd;
-    struct sockaddr servaddr; 
-    memset(&servaddr, 0, sizeof(servaddr)); 
+    struct sockaddr_storage servaddr; 
+    memset(&servaddr, 0, sizeof(struct sockaddr)); 
     if (!ctx->unix1) {
         // tcp
         assert((sockfd = socket(AF_INET, SOCK_STREAM, 0)) != -1); 
@@ -988,7 +993,7 @@ void *client_main(void *udata) {
         strcpy(addr->sun_path, "tsock");
     }
     // connect the client socket to server socket 
-    assert(!connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)));
+    assert(!connect(sockfd, (struct sockaddr*)&servaddr, sizeof(struct sockaddr)));
 
     // send around 100MB of paritally random packet up to 1MB, which
     // will be echoed back.
@@ -1068,6 +1073,10 @@ void test_client_server() {
     pthread_join(cth3, NULL);
 
     pthread_mutex_unlock(&ctx.ready);
+    for (int i = 0; i < 10; i++) {
+        if (ctx.cclosed == 4 && ctx.copened == 4) break;
+        usleep(10000);
+    }
     assert(ctx.cclosed == 4);
     assert(ctx.copened == 4);
     pthread_mutex_lock(&ctx.ready);
