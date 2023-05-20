@@ -4,7 +4,9 @@
 // Documentation at https://github.com/tidwall/evio.c
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <assert.h>
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
@@ -80,6 +82,7 @@ struct evio_conn {
 };
 
 struct evio {
+    int qfd;
     struct evio_events events;
     char errmsg[256];
     struct hashmap *conns;
@@ -277,9 +280,7 @@ const char *evio_conn_addr(struct evio_conn *conn) {
     return conn->addr;
 }
 
-static void net_accept(struct evio *evio, int qfd, int sfd, 
-                       struct addr *a)
-{
+static void net_accept(struct evio *evio, int qfd, int sfd, struct addr *a) {
     struct evio_conn *conn = NULL;
     int cfd = -1;
     struct sockaddr_storage addr;
@@ -289,6 +290,9 @@ static void net_accept(struct evio *evio, int qfd, int sfd,
     if (setnonblock(cfd) == -1) goto fail;
     if (!a->unsock && setkeepalive(cfd) == -1) goto fail;
     // if (!a->unsock && settcpnodelay(cfd) == -1) goto fail;
+
+    
+
     if (net_addrd(qfd, cfd) == -1) goto fail;
     conn = emalloc(sizeof(struct evio_conn));
     if (!conn) goto fail;
@@ -602,23 +606,56 @@ static int which_socketfd(int fd, struct addr **addrs, int naddrs) {
 struct evio_conn *get_conn(struct evio *evio, int fd) {
     struct evio_conn key = { .fd = fd };
     struct evio_conn *keyptr = &key;
-    void *v = hashmap_get(evio->conns, &keyptr);
+    const void *v = hashmap_get(evio->conns, &keyptr);
     if (!v) {
         return NULL;
     }
     return *(struct evio_conn**)v;
 }
 
+static uint64_t u64rand() {
+    uint64_t seed = 0;
+    FILE *urandom = fopen("/dev/urandom", "r");
+    if (urandom) {
+        assert(fread(&seed, sizeof(uint64_t), 1, urandom));
+        fclose(urandom);
+    }
+    return seed;
+}
+
+
+// pcg-family random number generator
+// http://www.pcg-random.org/
+// Only need to call the rand_uint32() with a pointer to a seed.
+
+static int64_t rincr(int64_t seed) {
+    return (int64_t)((uint64_t)(seed)*6364136223846793005 + 1);
+}
+
+static uint32_t rgen(int64_t seed) {
+    uint64_t state = seed;
+    uint32_t xorshifted = (uint32_t)(((state >> 18) ^ state) >> 27);
+    uint32_t rot = (uint32_t)(state >> 59);
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+
+static uint32_t rand_uint32(uint64_t *seed) {
+    *seed = rincr(rincr(*seed)); // twice called intentionally
+    return rgen(*seed);
+}
+
+
 struct thread_context {
     pthread_mutex_t *mu;
     bool serving;
     int server_id;
-    //
+    int nevios;
+    struct evio **evios;
+    atomic_int next;
     struct evio_events events;
     void *udata;
     struct addr **paddrs;
     int naddrs;
-    
 };
 
 static void *thread(void *thdata) {
@@ -629,7 +666,7 @@ static void *thread(void *thdata) {
     evio->events = thctx->events;
     evio->udata = thctx->udata;
     evio->conns = hashmap_new(sizeof(struct conn *), 0, 0, 0, conn_hash, 
-                              conn_compare, NULL, NULL);
+        conn_compare, NULL, NULL);
     if (!evio->conns) {
         eprintf(true, "%s", strerror(ENOMEM));
     }
@@ -637,6 +674,7 @@ static void *thread(void *thdata) {
     if (qfd == -1) {
         eprintf(true, "net_queue: %s", strerror(errno));
     }
+    evio->qfd = qfd;
     // add all socket fds to queue
     int naddrsfds = 0;
     for (int i = 0; i < thctx->naddrs; i++) {
@@ -648,11 +686,17 @@ static void *thread(void *thdata) {
             naddrsfds++;
         }
     }
-    // int server_id;
+    int server_id;
     int64_t tick_delay = -1;
     pthread_mutex_lock(thctx->mu);
+    server_id = thctx->server_id;
+    thctx->evios[server_id] = evio;
     thctx->server_id++;
-    // server_id = thctx->server_id;
+    while (thctx->server_id < thctx->nevios) {
+        pthread_mutex_unlock(thctx->mu);
+        sched_yield();
+        pthread_mutex_lock(thctx->mu);
+    }
     if (!thctx->serving) {
         thctx->serving = true;
         if (evio->events.serving) {
@@ -679,9 +723,11 @@ static void *thread(void *thdata) {
     }
     pthread_mutex_unlock(thctx->mu);
 
+    bool round_robin = true;
+    uint64_t rseed = u64rand();
     bool synced = false;
-    char buffer[4096];
-    int fds[128];
+    char buffer[16384];
+    int fds[32];
 
     int64_t start = evio_now();
     for (;;) {
@@ -720,20 +766,25 @@ static void *thread(void *thdata) {
             }
         }
         for (int i = 0; i < n; i++) {
-            // not a connection, check if it's a server socket.
+            // check if it's a server socket.
             int j = which_socketfd(fds[i], thctx->paddrs, thctx->naddrs);
             if (j != -1) {
                 // accept the incoming connection.
-                net_accept(evio, qfd, fds[i], thctx->paddrs[j]);
+                bool accept = false;
+                if (round_robin) {
+                    int next = atomic_fetch_add(&thctx->next, 1);
+                    accept = (next%thctx->nevios) == server_id;
+                } else {
+                    // randomly balanced
+                    accept = rand_uint32(&rseed)%thctx->nevios == 0;
+                }
+                if (accept) {
+                    net_accept(evio, qfd, fds[i], thctx->paddrs[j]);
+                }
                 continue;
             }
             struct evio_conn *conn = get_conn(evio, fds[i]);
-            if (!conn) {
-                continue;
-            }
-            if (!conn_flush(evio, conn)) {
-                continue;
-            }
+            if (!conn || !conn_flush(evio, conn)) continue;
             while (true) {
                 int n = read(conn->fd, buffer, sizeof(buffer)-1);
                 if (n <= 0) {
@@ -752,25 +803,16 @@ static void *thread(void *thdata) {
         }
         if (evio->events.sync && n > 0) {
             synced = evio->events.sync(evio->udata);
-            if (!synced) {
-                continue;
-            }
+            if (!synced) continue;
         }
         for (int i = 0; i < n; i++) {
             if (which_socketfd(fds[i], thctx->paddrs, thctx->naddrs) != -1) {
                 continue;
             }
             struct evio_conn *conn = get_conn(evio, fds[i]);
-            if (!conn) {
-                continue;
-            }
-            if (!conn_flush(evio, conn)) {
-                continue;
-            }
-            if (conn->wbuf.cap > 4096) {
-                efree(conn->wbuf.data);
-                conn->wbuf.data = NULL;
-                conn->wbuf.cap = 0;
+            if (!conn || !conn_flush(evio, conn)) continue;
+            if (conn->wbuf.cap > 16384) {
+                buf_clear(&conn->wbuf);
             }
         }
     }
@@ -810,6 +852,13 @@ void evio_main_mt(const char *addrs[], int naddrs, struct evio_events events,
     if (nthreads < 1) {
         nthreads = 1;
     }
+    thctx.nevios = nthreads;
+    thctx.evios = emalloc(nthreads * sizeof(struct evio*));
+    if (!thctx.evios) {
+        eprintf(true, "%s", strerror(ENOMEM));
+    }
+    memset(thctx.evios, 0, nthreads * sizeof(struct evio*));
+
     for (long i = 1; i < nthreads; i++) {
         pthread_t th;
         int res = pthread_create(&th, NULL, thread, &thctx);
