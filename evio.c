@@ -584,7 +584,7 @@ static bool conn_flush(struct evio *evio, struct evio_conn *conn) {
     return true;
 }
 
-int64_t evio_now() {
+int64_t evio_now(void) {
     struct timespec tm;
     if (clock_gettime(CLOCK_MONOTONIC, &tm) == -1) {
         panic("clock_gettime: %s", strerror(errno));
@@ -644,6 +644,14 @@ static uint32_t rand_uint32(uint64_t *seed) {
     return rgen(*seed);
 }
 
+static __thread int nthreads = 0;
+
+/// Returns the number of actual threads being used to server connections.
+/// This is only available from inside the 'serving' event. Returns zero in all
+/// other contexts. 
+int evio_nthreads(void) {
+    return nthreads;
+}
 
 struct thread_context {
     pthread_mutex_t *mu;
@@ -710,7 +718,9 @@ static void *thread(void *thdata) {
                     saddrs[k++] = thctx->paddrs[i]->addrs[j];
                 }
             }
+            nthreads = thctx->nevios;
             evio->events.serving((const char**)saddrs, naddrsfds, evio->udata);
+            nthreads = 0;
         }
         if (evio->events.tick) {
             tick_delay = evio->events.tick(evio->udata);
@@ -961,6 +971,7 @@ struct tctx {
 };
 
 void tserving(const char **addrs, int naddrs, void *udata) {
+    assert(evio_nthreads() > 0);
     struct tctx *ctx = udata;
     pthread_mutex_unlock(&ctx->ready);
 }
@@ -971,6 +982,7 @@ void terror(const char *msg, bool fatal, void *udata) {
 }
 
 void topened(struct evio_conn *conn, void *udata) {
+    assert(evio_nthreads() == 0);
     struct tctx *ctx = udata;
     pthread_mutex_lock(&ctx->ready);
     ctx->copened++;

@@ -22,20 +22,18 @@ const char *evio_conn_addr(struct evio_conn *conn);
 struct evio_events {
     int64_t (*tick)(void *udata);
     bool (*sync)(void *udata);
-    void (*data)(struct evio_conn *conn, 
-                 const void *data, size_t len, void *udata);
+    void (*data)(struct evio_conn *conn, const void *data, size_t len, void *udata);
     void (*opened)(struct evio_conn *conn, void *udata);
     void (*closed)(struct evio_conn *conn, void *udata);
     void (*serving)(const char **addrs, int naddrs, void *udata);
     void (*error)(const char *message, bool fatal, void *udata);
 };
 
-int64_t evio_now();
+int evio_nthreads(void);
+int64_t evio_now(void);
 
-void evio_main(const char *addrs[], int naddrs, struct evio_events events, 
-               void *udata);
-void evio_main_mt(const char *addrs[], int naddrs, struct evio_events events, 
-                  void *udata, int nthreads);
+void evio_main(const char *addrs[], int naddrs, struct evio_events events, void *udata);
+void evio_main_mt(const char *addrs[], int naddrs, struct evio_events events, void *udata, int nthreads);
 void evio_set_allocator(void *(malloc)(size_t), void (*free)(void*));
 
 #endif
