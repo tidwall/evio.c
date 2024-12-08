@@ -559,7 +559,7 @@ static bool conn_flush(struct evio *evio, struct evio_conn *conn) {
             if (n == -1) {
                 if (errno == EAGAIN) {
                     if (!wake(conn)) {
-                        close_remove_conn(conn, evio);    
+                        close_remove_conn(conn, evio);
                     } else {
                         conn->wbuf_idx = i;
                     }
@@ -764,6 +764,7 @@ static void *thread(void *thdata) {
             evio->faulty = false;
             continue;
         }
+        // printf("nevents: %d, synced: %d\n", n, synced);
         if (!synced) {
             // sync before doing anything with connections.
             if (evio->events.sync) {
@@ -811,16 +812,35 @@ static void *thread(void *thdata) {
                 }
             }
         }
+        bool sync_failed = false;
         if (evio->events.sync && n > 0) {
             synced = evio->events.sync(evio->udata);
-            if (!synced) continue;
+            if (!synced) {
+                sync_failed = true;
+            }
         }
         for (int i = 0; i < n; i++) {
             if (which_socketfd(fds[i], thctx->paddrs, thctx->naddrs) != -1) {
+                // The file descriptor is a server socket.
                 continue;
             }
             struct evio_conn *conn = get_conn(evio, fds[i]);
-            if (!conn || !conn_flush(evio, conn)) continue;
+            if (!conn || conn->wbuf.len == 0) {
+                // No connection or no write buffer.
+                continue;
+            }
+            if (sync_failed) {
+                // When a sync failed all of the connections that have write
+                // buffers must be woken up on next queue iteration.
+                if (!wake(conn)) {
+                    close_remove_conn(conn, evio);
+                }
+                continue;
+            }
+            if (!conn_flush(evio, conn)) {
+                // Could not flush the write buffer to the connection.
+                continue;
+            }
             if (conn->wbuf.cap > 16384) {
                 buf_clear(&conn->wbuf);
             }
